@@ -1,53 +1,64 @@
-# Oracle Database 23ai Free Monitoring Dashboard (Proof of Concept)
+# Oracle Database 23ai Free Monitoring Dashboard
 
-## 🎯 Cíl projektu
+Real-time monitoring dashboard for Oracle Database 23ai Free without Enterprise Manager or licensed diagnostic packs.
 
-Cílem je vytvořit ukázkový **real-time monitoring dashboard** pro Oracle Database 23ai Free, který nevyžaduje Enterprise Manager ani placené licenční balíčky (AWR, ADDM apod.).  
-Architektura je navržena **co nejjednodušeji** – **backend v Pythonu (Flask)**, **frontend v Reactu (Vite)**, **data pouze v paměti** (bez databáze).
+## Overview
 
----
+This application provides a web-based monitoring interface for Oracle Database 23ai Free, featuring real-time metrics, session monitoring, performance statistics, and SQL query execution.
 
-## ⚙️ Technologie a požadavky
+**Key Features:**
+- Real-time database metrics and session monitoring
+- Active SQL and wait events tracking
+- Tablespace and storage management
+- System resource visualization
+- SQL query interface with export capabilities
+- No Oracle Instant Client required (uses python-oracledb thin mode)
 
-- **Backend:** Python 3.9+, Flask, Flask-CORS, python-oracledb (thin mode)  
-- **Frontend:** React (Vite), JavaScript, Axios  
-- **Oracle DB:** Oracle Database 23ai Free (běžící lokálně nebo vzdáleně)  
-- **O/S:** Linux, macOS, Windows  
-- **Výhoda:** **Žádný Oracle Instant Client není potřeba!** 🎉  
-- **Doporučení:** Projekt je určen pro laboratorní a výukové účely – **pouze real-time data bez historie**  
+**Technology Stack:**
+- Backend: Python 3.9+, Flask, Flask-CORS, python-oracledb
+- Frontend: React 18, Vite, Recharts
+- Database: Oracle Database 23ai Free
 
----
+## Prerequisites
 
-## 🚀 Instalace a první spuštění
+- Python 3.9 or higher
+- Node.js 18 or higher
+- Oracle Database 23ai Free (running and accessible)
 
-### 1. Příprava prostředí
+## Installation
 
-#### Systémové požadavky
-- **Python 3.9+** - ověřte: `python --version`
-- **Node.js 18+** - ověřte: `node --version`
-- **Oracle Database 23ai Free** - musí běžet a být dostupný po síti
-
----
-
-### 2. Backend (Flask)
+### 1. Clone the repository
 
 ```bash
-# Vytvoření struktury projektu
-mkdir backend
-cd backend
-
-# Virtuální prostředí
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/macOS
-
-# Instalace závislostí (ŽÁDNÝ Instant Client není potřeba!)
-pip install flask flask-cors oracledb
+git clone https://github.com/mugac/sdbs-monitoring.git
+cd sdbs-monitoring
 ```
 
-#### Konfigurace připojení k Oracle
+### 2. Backend Setup
 
-Vytvořte soubor `.env` v adresáři `backend`:
+Navigate to the backend directory and install Python dependencies. Using a virtual environment is strongly recommended:
+
+```bash
+cd backend
+python -m venv venv
+
+# Activate virtual environment
+# Windows:
+venv\Scripts\activate
+# Linux/macOS:
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+#### Configure Database Connection
+
+Create a `.env` file in the `backend` directory:
+
+#### Configure Database Connection
+
+Create a `.env` file in the `backend` directory:
 
 ```
 ORACLE_USER=system
@@ -57,322 +68,157 @@ ORACLE_PORT=1521
 ORACLE_SERVICE=FREEPDB1
 ```
 
-**Minimální potřebná oprávnění pro DB uživatele:**
+**Required Database Privileges:**
+
+The database user needs SELECT privileges on system views:
+
 ```sql
 GRANT SELECT ON V_$SESSION TO your_user;
 GRANT SELECT ON V_$SESSION_WAIT TO your_user;
 GRANT SELECT ON V_$SQL TO your_user;
 GRANT SELECT ON V_$SGA_DYNAMIC_COMPONENTS TO your_user;
+GRANT SELECT ON DBA_TABLESPACES TO your_user;
+GRANT SELECT ON DBA_DATA_FILES TO your_user;
+GRANT SELECT ON DBA_FREE_SPACE TO your_user;
+GRANT SELECT ON DBA_TABLES TO your_user;
+GRANT SELECT ON DBA_SEGMENTS TO your_user;
 ```
 
----
+### 3. Frontend Setup
 
-### 💻 Backend kód – `backend/app.py`
-
-```python
-import os
-from datetime import datetime
-from flask import Flask, jsonify
-from flask_cors import CORS
-import oracledb
-
-# Konfigurace
-ORACLE_USER = os.getenv('ORACLE_USER', 'system')
-ORACLE_PASSWORD = os.getenv('ORACLE_PASSWORD', 'oracle')
-ORACLE_HOST = os.getenv('ORACLE_HOST', 'localhost')
-ORACLE_PORT = os.getenv('ORACLE_PORT', '1521')
-ORACLE_SERVICE = os.getenv('ORACLE_SERVICE', 'FREEPDB1')
-
-app = Flask(__name__)
-CORS(app)  # Povolí CORS pro frontend
-
-
-def get_oracle_connection():
-    """Vytvoří nové připojení k Oracle DB v thin mode (bez Instant Client)"""
-    return oracledb.connect(
-        user=ORACLE_USER,
-        password=ORACLE_PASSWORD,
-        host=ORACLE_HOST,
-        port=int(ORACLE_PORT),
-        service_name=ORACLE_SERVICE
-    )
-
-
-def fetch_metrics():
-    """Načte aktuální metriky z Oracle DB"""
-    try:
-        conn = get_oracle_connection()
-        cur = conn.cursor()
-
-        # 1. Aktivní sessions
-        cur.execute("SELECT COUNT(*) FROM V$SESSION WHERE STATUS='ACTIVE'")
-        active_sessions = cur.fetchone()[0]
-
-        # 2. Top wait events
-        cur.execute("""
-            SELECT EVENT, COUNT(*) as CNT 
-            FROM V$SESSION_WAIT
-            WHERE EVENT NOT LIKE '%idle%'
-            GROUP BY EVENT
-            ORDER BY CNT DESC 
-            FETCH FIRST 5 ROWS ONLY
-        """)
-        wait_events = [{'event': row[0], 'count': row[1]} for row in cur]
-
-        # 3. Top SQL podle CPU time
-        cur.execute("""
-            SELECT SQL_ID, EXECUTIONS, 
-                   ROUND(CPU_TIME/1000000,2) as CPU_SEC,
-                   SUBSTR(SQL_TEXT,1,80) as SQL_TEXT
-            FROM V$SQL 
-            WHERE EXECUTIONS > 0
-            ORDER BY CPU_TIME DESC 
-            FETCH FIRST 5 ROWS ONLY
-        """)
-        top_sql = [{'sql_id': r[0], 'executions': r[1], 'cpu_sec': r[2], 'text': r[3]} 
-                   for r in cur]
-
-        # 4. SGA komponenty
-        cur.execute("""
-            SELECT COMPONENT, ROUND(CURRENT_SIZE/1024/1024,2) as SIZE_MB
-            FROM V$SGA_DYNAMIC_COMPONENTS
-            WHERE CURRENT_SIZE > 0 
-            ORDER BY CURRENT_SIZE DESC
-        """)
-        sga_stats = [{'component': r[0], 'size_mb': r[1]} for r in cur]
-
-        cur.close()
-        conn.close()
-        
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'active_sessions': active_sessions,
-            'wait_events': wait_events,
-            'top_sql': top_sql,
-            'sga_stats': sga_stats
-        }
-    except oracledb.Error as error:
-        print(f"Oracle error: {error}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return None
-
-
-@app.route('/api/health', methods=['GET'])
-def get_health():
-    """Vrátí aktuální stav databáze"""
-    metrics = fetch_metrics()
-    if metrics is None:
-        return jsonify({'error': 'Failed to fetch metrics from Oracle'}), 500
-    return jsonify(metrics)
-
-
-@app.route('/api/ping', methods=['GET'])
-def ping():
-    """Zdravotní check API"""
-    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
-
-
-if __name__ == '__main__':
-    print("🚀 Starting Oracle Monitoring Backend...")
-    print(f"📊 Connecting to Oracle: {ORACLE_USER}@{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE}")
-    app.run(host='0.0.0.0', port=5000, debug=True)
-```
-
----
-
-### 3. Frontend (React + Vite)
+Navigate to the frontend directory and install dependencies:
 
 ```bash
-# Vytvoření React projektu
-npm create vite@latest frontend -- --template react
 cd frontend
 npm install
-npm install axios
 ```
 
-#### 📁 Struktura komponent
+## Running the Application
 
-```
-frontend/
-├── src/
-│   ├── App.jsx              # Hlavní komponenta
-│   ├── components/
-│   │   ├── Dashboard.jsx    # Dashboard wrapper
-│   │   ├── SessionsCard.jsx # Aktivní sessions
-│   │   ├── WaitEventsTable.jsx  # Top wait events
-│   │   ├── TopSQLTable.jsx      # Top SQL dotazy
-│   │   └── SGAStatsTable.jsx    # SGA statistiky
-│   └── App.css
-└── vite.config.js
+### Option 1: Using start.bat (Windows)
+
+The simplest way to start both backend and frontend:
+
+```bash
+start.bat
 ```
 
-#### Konfigurace proxy v `vite.config.js`
+This will start the backend on `http://localhost:5000` and frontend on `http://localhost:5173`.
 
-```javascript
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+### Option 2: Manual Start (Recommended for Development)
 
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    proxy: {
-      '/api': {
-        target: 'http://localhost:5000',
-        changeOrigin: true,
-      }
-    }
-  }
-})
-```
+Start backend and frontend in separate terminal windows:
 
-#### Ukázkový fetch v komponentě
-
-```javascript
-import { useState, useEffect } from 'react';
-import axios from 'axios';
-
-function Dashboard() {
-  const [metrics, setMetrics] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await axios.get('/api/health');
-        setMetrics(response.data);
-        setLoading(false);
-      } catch (err) {
-        setError(err.message);
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-    // Refresh každých 30 sekund
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  if (loading) return <div>Načítání...</div>;
-  if (error) return <div>Chyba: {error}</div>;
-
-  return (
-    <div className="dashboard">
-      <h1>Oracle DB Monitor</h1>
-      {/* Komponenty pro zobrazení metrik */}
-    </div>
-  );
-}
-```
-
----
-
-## 🧩 Spuštění aplikace
-
-### Backend
+**Terminal 1 - Backend:**
 ```bash
 cd backend
 venv\Scripts\activate  # Windows
 # source venv/bin/activate  # Linux/macOS
 python app.py
 ```
-Backend běží na `http://localhost:5000`
 
-### Frontend
+**Terminal 2 - Frontend:**
 ```bash
 cd frontend
 npm run dev
 ```
-Frontend běží na `http://localhost:5173`
 
-### Otevřete prohlížeč
-Přejděte na `http://localhost:5173` a uvidíte dashboard s real-time daty z Oracle DB.
+### Accessing the Application
 
----
+Open your browser and navigate to: `http://localhost:5173`
 
-## 🎨 Design a UX doporučení
+## Stopping the Application
 
-- **Automatický refresh:** Dashboard se obnovuje každých 30 sekund
-- **Loading stavy:** Zobrazit spinner při načítání dat
-- **Error handling:** Jasné chybové hlášky při výpadku spojení
-- **Responsive design:** Funkční i na menších obrazovkách
-- **Barevné kódování:** Zelená (OK), Žlutá (Warning), Červená (Critical)
+### Using stop.bat (Windows)
 
----
+```bash
+stop.bat
+```
 
-## 🔧 Možná rozšíření
+### Manual Stop
 
-- ✅ Přidat další metriky (locks, tablespaces, redo logs)
-- ✅ Graf v čase (in-memory buffer posledních N měření)
-- ✅ Alert thresholdy (např. >20 aktivních sessions)
-- ✅ Dark mode
-- ✅ Export aktuálního stavu do JSON/CSV
-- ⚠️ Autentizace uživatelů (pro produkci)
-- ⚠️ Persistence dat do SQLite/PostgreSQL (pokud chcete historii)  
+Press `Ctrl+C` in each terminal window running the backend and frontend.
 
----
+## Project Structure
 
-## � Troubleshooting
+```
+dbsmonitoring/
+├── backend/
+│   ├── app.py                  # Flask backend application
+│   ├── requirements.txt        # Python dependencies
+│   ├── test_connection.py      # Database connection test
+│   └── .env                    # Database configuration (create this)
+├── frontend/
+│   ├── src/
+│   │   ├── components/         # React components
+│   │   │   ├── tabs/          # Tab components
+│   │   │   └── ...            # Various dashboard components
+│   │   ├── App.jsx            # Main application component
+│   │   └── main.jsx           # Application entry point
+│   ├── package.json           # Node.js dependencies
+│   └── vite.config.js         # Vite configuration
+├── start.bat                  # Windows startup script
+├── stop.bat                   # Windows shutdown script
+└── README.md                  # This file
+```
 
-### Backend nenaváže spojení s Oracle
-- ✅ Zkontrolujte, že Oracle DB běží: `lsnrctl status`
-- ✅ Ověřte credentials v `.env` souboru
-- ✅ Zkontrolujte, že port 1521 je dostupný
-- ✅ Ověřte service name: `FREEPDB1` (nebo jiný)
-- ✅ Zkontrolujte firewall a síťové nastavení
+## Features
 
-### Frontend nedostává data
-- ✅ Zkontrolujte, že backend běží na portu 5000
-- ✅ Ověřte proxy konfiguraci ve `vite.config.js`
-- ✅ Otevřete browser console (F12) a zkontrolujte network tab
+### Dashboard Tabs
 
-### CORS chyby
-- ✅ Ujistěte se, že máte nainstalovaný `flask-cors`
-- ✅ Zkontrolujte, že `CORS(app)` je v `app.py`
+1. **Overview** - Database information and system status
+2. **Sessions** - Active and user sessions monitoring
+3. **Performance** - Wait events and system resource metrics
+4. **Active SQL** - Currently executing SQL statements
+5. **SQL Query** - Execute custom queries with export functionality
+6. **Storage** - Tablespace usage and management
+7. **Table Stats** - Table and segment statistics
+8. **System Resources** - SGA components and system events
 
----
+## Troubleshooting
 
-##  Zdroje
+### Backend Connection Issues
 
-- [Oracle V$ Views dokumentace](https://docs.oracle.com/en/database/oracle/oracle-database/23/arpls/dyn-performance-views.html)  
-- [Flask documentation](https://flask.palletsprojects.com/)  
-- [Flask-CORS](https://flask-cors.readthedocs.io/)
-- [python-oracledb (thin mode)](https://python-oracledb.readthedocs.io/)  
-- [React (Vite)](https://vitejs.dev/)  
-- [Axios](https://axios-http.com/)
+- Verify Oracle Database is running: `lsnrctl status`
+- Check `.env` file credentials are correct
+- Ensure port 1521 is accessible
+- Verify service name matches your database configuration
 
----
+### Frontend Not Receiving Data
 
-## 📝 Poznámky k implementaci
+- Confirm backend is running on port 5000
+- Check browser console (F12) for network errors
+- Verify proxy configuration in `vite.config.js`
 
-- **Maximálně jednoduchý PoC:** Žádná databáze, žádné threading, žádný Instant Client
-- **python-oracledb thin mode:** Pure Python, funguje všude, žádné binární závislosti
-- **Real-time pouze:** Data se načítají při každém API volání
-- **Stateless:** Restart = ztráta všech dat (to je OK pro PoC)
-- **Škálovatelnost:** Pro produkci přidat caching, connection pooling, rate limiting
+### CORS Errors
 
----
+- Ensure `flask-cors` is installed: `pip install flask-cors`
+- Verify `CORS(app)` is present in `app.py`
 
-## 🎯 Shrnutí: Co NEPOTŘEBUJETE
+## Dependencies
 
-✅ **NEPOTŘEBUJETE:**
-- ❌ Oracle Instant Client
-- ❌ SQLite databázi
-- ❌ Komplikované instalace
-- ❌ LD_LIBRARY_PATH nebo PATH konfigurace
-- ❌ Threading nebo background procesy
-- ❌ Grafové knihovny (Recharts)
+### Backend (requirements.txt)
 
-✅ **POTŘEBUJETE jen:**
-- ✅ Python 3.9+
-- ✅ Node.js 18+
-- ✅ 3 pip balíčky: `flask`, `flask-cors`, `oracledb`
-- ✅ 1 npm balíček: `axios`
-- ✅ Běžící Oracle Database 23ai Free
+- flask==3.0.0
+- flask-cors==4.0.0
+- oracledb==2.0.0
+- python-dotenv==1.0.0
 
----
+### Frontend (package.json)
 
-Tento projekt představuje **nejjednodušší možný Proof of Concept** pro real-time monitoring Oracle Database 23ai Free - **bez komerčních komponent, bez složitých závislostí, bez Instant Client!** 🚀
+- react: ^18.2.0
+- react-dom: ^18.2.0
+- axios: ^1.6.2
+- recharts: ^3.4.1
+- vite: ^5.0.8
+
+## Development Notes
+
+- Application fetches real-time data without persistence
+- No Oracle Instant Client required (uses python-oracledb thin mode)
+- Designed for development and educational purposes
+- Auto-refresh intervals: 30 seconds (overview), 10 seconds (active SQL)
+
+## License
+
+This project is open source and available for educational and development purposes.
