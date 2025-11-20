@@ -212,4 +212,4 @@ dbsmonitoring/
 
 ## License
 
-This project is open source and available for educational and development purposes.
+This project is open source and under GNU GENERAL PUBLIC LICENSE.
